@@ -1,3 +1,11 @@
 0 Oil
 1 Paper
 2 Plastic
+3 Cardboard
+4 Glass
+5 Metal
+6 Organic
+7 Other
+8 Styrofoam
+9 Textile
+10 Wood
