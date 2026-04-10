@@ -35,8 +35,7 @@ except Exception as e:
 # ──────────────────────────────────────────────
 model = None
 try:
-    from tensorflow import keras
-    model = keras.models.load_model('models/keras_model.h5', compile=False)
+    model = tf.keras.models.load_model('models/keras_model.h5', compile=False)
     print("[OK] Model loaded successfully!")
 except Exception as e:
     print(f"[WARN] Could not load model: {e}")
@@ -274,27 +273,42 @@ def ask_pret():
     if not data:
         return jsonify({'error': 'Request body must be JSON'}), 400
 
-    query = data.get('query', '')
+    query = data.get('query', '').lower() # نحول الكلام لـ small لسهولة البحث
     
     if not query:
         return jsonify({'error': 'No query provided'}), 400
 
-    # Default fallback message (set before try so it's always defined)
-    not_found_msg = "Sorry, I couldn't find enough information on this topic."
+    # 1. قائمة الكلمات المفتاحية المتعلقة بالتدوير والبيئة (بالعربي والإنجليزي)
+    environmental_keywords = [
+        'recycling', 'waste', 'plastic', 'paper', 'oil', 'environment', 
+        'pollution', 'climate', 'green', 'nature', 'sustainability',
+        'تدوير', 'نفايات', 'بلاستيك', 'ورق', 'زيت', 'بيئة', 
+        'تلوث', 'مناخ', 'استدامة', 'مخلفات', 'قمامة'
+    ]
 
+    # 2. التحقق: هل السؤال له علاقة بالموضوع؟
+    is_related = any(word in query for word in environmental_keywords)
+
+    if not is_related:
+        # رد مخصص لو السؤال بره الموضوع
+        language = detect(query)
+        if language == 'ar':
+            return jsonify({'answer': "عذراً، أنا متخصص فقط في الأمور المتعلقة بإعادة التدوير والبيئة. كيف يمكنني مساعدتك في هذا المجال؟"})
+        else:
+            return jsonify({'answer': "Sorry, I am only specialized in recycling and environmental topics. How can I help you in this field?"})
+
+    # 3. لو السؤال له علاقة، نبدأ عملية البحث في ويكيبيديا
     try:
-        # 1. Detect language of the question (Arabic or English)
         language = detect(query)
         
         # 2. Set Wikipedia language and error message accordingly
         if language == 'ar':
             wikipedia.set_lang("ar")
-            not_found_msg = "عذراً، لم أجد معلومات كافية عن هذا الموضوع في موسوعتي."
+            not_found_msg = "عذراً، لم أجد معلومات كافية عن هذا الموضوع البيئي."
         else:
             wikipedia.set_lang("en")
-            not_found_msg = "Sorry, I couldn't find enough information on this topic."
+            not_found_msg = "Sorry, I couldn't find enough information on this environmental topic."
 
-        # 3. Fetch 2-sentence summary
         summary = wikipedia.summary(query, sentences=2)
         
         return jsonify({
@@ -303,7 +317,7 @@ def ask_pret():
             'source': 'PRET Encyclopedia (Wikipedia)'
         })
     except Exception as e:
-        return jsonify({'answer': not_found_msg, 'detail': str(e)}), 200
+        return jsonify({'answer': not_found_msg})
 
 
 if __name__ == '__main__':
