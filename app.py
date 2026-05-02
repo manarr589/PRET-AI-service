@@ -17,7 +17,7 @@ app = Flask(__name__)
 # ──────────────────────────────────────────────
 # MongoDB Connection
 # ──────────────────────────────────────────────
-MONGO_URI    = "mongodb://mongo:rRvQcNzThKlzXcRIJxcaSclhhuqYRXFl@junction.proxy.rlwy.net:35860"
+MONGO_URI    = "mongodb+srv://pret_user:oupk4zU5yVk6g4Lf@cluster0.iutwdeh.mongodb.net/?appName=Cluster0"
 MONGO_DB_NAME = "test" # <- change to your actual DB name if different
 
 try:
