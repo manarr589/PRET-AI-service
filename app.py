@@ -18,7 +18,7 @@ app = Flask(__name__)
 # MongoDB Connection
 # ──────────────────────────────────────────────
 MONGO_URI    = "mongodb+srv://pret_user:oupk4zU5yVk6g4Lf@cluster0.iutwdeh.mongodb.net/?appName=Cluster0"
-MONGO_DB_NAME = "test" # <- change to your actual DB name if different
+MONGO_DB_NAME = "test"
 
 try:
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
