@@ -35,7 +35,7 @@ except Exception as e:
 # ──────────────────────────────────────────────
 model = None
 try:
-    model = tf.keras.models.load_model('models/keras_model.h5', compile=False)
+    model = tf.keras.models.load_model('Models/keras_model.h5', compile=False)
     print("[OK] Model loaded successfully!")
 except Exception as e:
     print(f"[WARN] Could not load model: {e}")
