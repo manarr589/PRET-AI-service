@@ -35,25 +35,26 @@ except Exception as e:
 # ──────────────────────────────────────────────
 # TensorFlow Model
 # ──────────────────────────────────────────────
-import os
-import tensorflow as tf
-
-# الحصول على المسار الأساسي
+# 1. تحديد المسار الأساسي
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# دمج المسار: مجلد Models ثم ملف keras_model.h5
+# 2. بناء المسار (تأكد أن الحروف تطابق GitHub تماماً)
+# إذا كان المجلد Models والملف keras_model.h5
 model_path = os.path.join(BASE_DIR, 'Models', 'keras_model.h5')
 
 model = None
 try:
     if os.path.exists(model_path):
+        # تحميل الموديل بدون تفعيل الـ Compile لتوفير الذاكرة وتجنب الأخطاء
         model = tf.keras.models.load_model(model_path, compile=False)
-        print(f"[OK] Model loaded from: {model_path}")
+        print(f"Success: Model loaded from {model_path}")
     else:
-        # إذا لم يجد الملف، سيطبع لنا في الـ Logs أين بحث بالضبط
-        print(f"[ERROR] Model NOT found! Path searched: {model_path}")
+        print(f" Error: File not found at {model_path}")
+        # هذا السطر سيطبع لك محتويات المجلد في الـ Logs لتكتشف الاسم الصحيح
+        if os.path.exists(os.path.join(BASE_DIR, 'Models')):
+            print(f"Folder 'Models' contains: {os.listdir(os.path.join(BASE_DIR, 'Models'))}")
 except Exception as e:
-    print(f"[WARN] Error loading model: {e}")
+    print(f" Warning: Model load failed: {str(e)}")
 
 # ──────────────────────────────────────────────
 # Helper: classify waste from image
