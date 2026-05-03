@@ -11,13 +11,14 @@ from bson import ObjectId
 import io
 import wikipedia
 from langdetect import detect
+
 app = Flask(__name__)
 
 # ──────────────────────────────────────────────
 # MongoDB Connection
 # ──────────────────────────────────────────────
-MONGO_URI    = "mongodb+srv://pret_user:oupk4zU5yVk6g4Lf@cluster0.iutwdeh.mongodb.net/?appName=Cluster0"
-MONGO_DB_NAME = "test"
+MONGO_URI = "mongodb+srv://pret_user:oupk4zU5yVk6g4Lf@cluster0.iutwdeh.mongodb.net/?appName=Cluster0"
+MONGO_DB_NAME = "test" 
 
 try:
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
@@ -45,34 +46,6 @@ except Exception as e:
 def predict_waste_type(image_file):
     if model is None:
         raise RuntimeError("Model is not loaded")
-    image = Image.open(image_file).convert('RGB')
-    image = image.resize((224, 224))
-    image_array = np.asarray(image) / 255.0
-    image_array = np.expand_dims(image_array, 0)
-    prediction = model.predict(image_array)
-    class_index = np.argmax(prediction)
-    waste_types = ["Plastic", "Paper", "Oil"]
-    return waste_types[class_index]
-
-# ──────────────────────────────────────────────
-# Routes
-# ──────────────────────────────────────────────
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Quick check — server alive + DB reachable."""
-    db_status = "disconnected"
-    if mongo_client:
-        try:
-            mongo_client.admin.command("ping")
-            db_status = "connected"
-        except Exception:
-            db_status = "unreachable"
-    return jsonify({'server': 'ok', 'database': db_status})
-
-def predict_waste_type(image_file):
-    if model is None:
-        raise RuntimeError("Model is not loaded")
     
     image = Image.open(image_file).convert('RGB')
     image = image.resize((224, 224))
@@ -83,12 +56,25 @@ def predict_waste_type(image_file):
     class_index = int(np.argmax(prediction))
     confidence = float(np.max(prediction))
     
-    # رجّع dictionary مش string
     return {
         "class_index": class_index,
         "confidence": round(confidence * 100, 2)
     }
 
+# ──────────────────────────────────────────────
+# Routes
+# ──────────────────────────────────────────────
+
+@app.route('/health', methods=['GET'])
+def health():
+    db_status = "disconnected"
+    if mongo_client:
+        try:
+            mongo_client.admin.command("ping")
+            db_status = "connected"
+        except Exception:
+            db_status = "unreachable"
+    return jsonify({'server': 'ok', 'database': db_status})
 
 @app.route('/classify_waste', methods=['POST'])
 def classify_waste():
@@ -102,13 +88,16 @@ def classify_waste():
     class_index = result['class_index']
     confidence  = result['confidence']
 
-    material = None
-    if db is not None:
-        materials = list(db['materials'].find({}).sort('createdAt', 1))
+    # قائمة المواد حسب ترتيب تدريب الموديل الخاص بك
+    waste_mapping = {0: "Plastic", 1: "Paper", 2: "Oil"}
+    target_material_name = waste_mapping.get(class_index, "Unknown")
 
-        if class_index < len(materials):
-            mat = materials[class_index]
-            material = {
+    material_info = None
+    if db is not None:
+        # البحث عن المادة في قاعدة البيانات بناءً على الاسم المكتشف
+        mat = db['materials'].find_one({"name": target_material_name})
+        if mat:
+            material_info = {
                 'id'   : str(mat['_id']),
                 'name' : mat.get('name'),
                 'price': mat.get('price')
@@ -117,52 +106,37 @@ def classify_waste():
     return jsonify({
         'class_index'  : class_index,
         'confidence'   : confidence,
-        'material_name': material['name'] if material else None,
-        'material_id'  : material['id']   if material else None,
-        'price'        : material['price'] if material else None,
+        'material_name': material_info['name'] if material_info else target_material_name,
+        'material_id'  : material_info['id'] if material_info else None,
+        'price'        : material_info['price'] if material_info else 0,
         'status'       : 'success'
     })
     
 @app.route('/predict_waste', methods=['GET'])
 def get_prediction():
-    """
-    Predicts next month's total waste weight using linear regression.
-
-    Schema used  (Waste collection):
-        - createdAt   : datetime added automatically by { timestamps: true }
-        - total_weight: number  (kg)
-        - status      : 'pending' | 'in_auction' | 'sold'
-
-    Optional query param:
-        ?status=sold   -> filter by status (default: all records)
-    """
     if db is None:
         return jsonify({'error': 'Database not connected'}), 503
 
-    status_filter = request.args.get('status')   # e.g. ?status=sold
-
+    status_filter = request.args.get('status')
     query = {}
     if status_filter:
         query['status'] = status_filter
 
-    # ── Fetch from 'wastes' collection ──
     wastes = db['wastes']
     records = list(wastes.find(query, {'_id': 0, 'createdAt': 1, 'total_weight': 1}))
 
     if not records:
-        return jsonify({'error': 'No waste records found in database'}), 404
+        return jsonify({'error': 'No waste records found'}), 404
 
-    # ── Build DataFrame ──
     data = pd.DataFrame(records)
     data['createdAt'] = pd.to_datetime(data['createdAt'], errors='coerce')
     data = data.dropna(subset=['createdAt', 'total_weight'])
 
     if data.empty:
-        return jsonify({'error': 'No valid records after parsing dates'}), 422
+        return jsonify({'error': 'No valid records after parsing'}), 422
 
     data['date_ordinal'] = data['createdAt'].map(datetime.toordinal)
 
-    # ── Linear Regression ──
     reg = LinearRegression()
     reg.fit(data[['date_ordinal']], data['total_weight'])
 
@@ -176,52 +150,39 @@ def get_prediction():
         'status_filter'     : status_filter or 'all'
     })
 
-
 @app.route('/waste_stats', methods=['GET'])
 def waste_stats():
-    """
-    Aggregates waste totals grouped by material name.
-    Joins 'wastes' -> 'materials' using material_id.
-
-    Returns list of:
-        { material_name, total_weight_kg, avg_price, count, statuses }
-    """
     if db is None:
         return jsonify({'error': 'Database not connected'}), 503
 
     pipeline = [
-        # Join material info
         {
             '$lookup': {
-                'from'        : 'materials',
-                'localField'  : 'material_id',
+                'from': 'materials',
+                'localField': 'material_id',
                 'foreignField': '_id',
-                'as'          : 'material'
+                'as': 'material'
             }
         },
         { '$unwind': { 'path': '$material', 'preserveNullAndEmpty': True } },
-
-        # Group by material
         {
             '$group': {
-                '_id'             : '$material._id',
-                'material_name'   : { '$first': '$material.name' },
-                'total_weight_kg' : { '$sum': '$total_weight' },
-                'avg_price'       : { '$avg': '$price' },
-                'count'           : { '$sum': 1 },
-                'statuses'        : { '$addToSet': '$status' }
+                '_id': '$material._id',
+                'material_name': { '$first': '$material.name' },
+                'total_weight_kg': { '$sum': '$total_weight' },
+                'avg_price': { '$avg': '$price' },
+                'count': { '$sum': 1 },
+                'statuses': { '$addToSet': '$status' }
             }
         },
-
-        # Clean up output
         {
             '$project': {
-                '_id'            : 0,
-                'material_name'  : { '$ifNull': ['$material_name', 'Unknown'] },
+                '_id': 0,
+                'material_name': { '$ifNull': ['$material_name', 'Unknown'] },
                 'total_weight_kg': { '$round': ['$total_weight_kg', 2] },
-                'avg_price'      : { '$round': ['$avg_price', 2] },
-                'count'          : 1,
-                'statuses'       : 1
+                'avg_price': { '$round': ['$avg_price', 2] },
+                'count': 1,
+                'statuses': 1
             }
         },
         { '$sort': { 'total_weight_kg': -1 } }
@@ -230,94 +191,54 @@ def waste_stats():
     results = list(db['wastes'].aggregate(pipeline))
     return jsonify({'stats': results, 'groups': len(results)})
 
-
-@app.route('/waste_by_status', methods=['GET'])
-def waste_by_status():
-    """
-    Returns total weight and count grouped by status:
-    pending | in_auction | sold
-    """
-    if db is None:
-        return jsonify({'error': 'Database not connected'}), 503
-
-    pipeline = [
-        {
-            '$group': {
-                '_id'            : '$status',
-                'total_weight_kg': { '$sum': '$total_weight' },
-                'count'          : { '$sum': 1 },
-                'avg_price'      : { '$avg': '$price' }
-            }
-        },
-        {
-            '$project': {
-                '_id'            : 0,
-                'status'         : '$_id',
-                'total_weight_kg': { '$round': ['$total_weight_kg', 2] },
-                'avg_price'      : { '$round': ['$avg_price', 2] },
-                'count'          : 1
-            }
-        }
-    ]
-
-    results = list(db['wastes'].aggregate(pipeline))
-    return jsonify({'by_status': results})
-
-
-
-# الميزة الجديدة: موسوعة بريت الذكية (تلقائية اللغة)
 @app.route('/ask_pret', methods=['POST'])
 def ask_pret():
-    data = request.json
-    if not data:
-        return jsonify({'error': 'Request body must be JSON'}), 400
-
-    query = data.get('query', '').lower() # نحول الكلام لـ small لسهولة البحث
+    data = request.json or {}
+    query = data.get('query', '').strip()
     
     if not query:
         return jsonify({'error': 'No query provided'}), 400
 
-    # 1. قائمة الكلمات المفتاحية المتعلقة بالتدوير والبيئة (بالعربي والإنجليزي)
+    # تحديد اللغة والرسائل الافتراضية
+    try:
+        lang = detect(query)
+    except:
+        lang = 'en'
+
+    if lang == 'ar':
+        not_found_msg = "عذراً، لم أجد معلومات كافية عن هذا الموضوع البيئي."
+        off_topic_msg = "عذراً، أنا متخصص فقط في إعادة التدوير والبيئة."
+        wikipedia.set_lang("ar")
+    else:
+        not_found_msg = "Sorry, I couldn't find enough information on this topic."
+        off_topic_msg = "Sorry, I am only specialized in recycling and environmental topics."
+        wikipedia.set_lang("en")
+
     environmental_keywords = [
         'recycling', 'waste', 'plastic', 'paper', 'oil', 'environment', 
         'pollution', 'climate', 'green', 'nature', 'sustainability',
         'تدوير', 'نفايات', 'بلاستيك', 'ورق', 'زيت', 'بيئة', 
-        'تلوث', 'مناخ', 'استدامة', 'مخلفات', 'قمامة'
+        'تلوث', 'مناخ', 'استدامة', 'مخلفات'
     ]
 
-    # 2. التحقق: هل السؤال له علاقة بالموضوع؟
-    is_related = any(word in query for word in environmental_keywords)
+    is_related = any(word in query.lower() for word in environmental_keywords)
 
     if not is_related:
-        # رد مخصص لو السؤال بره الموضوع
-        language = detect(query)
-        if language == 'ar':
-            return jsonify({'answer': "عذراً، أنا متخصص فقط في الأمور المتعلقة بإعادة التدوير والبيئة. كيف يمكنني مساعدتك في هذا المجال؟"})
-        else:
-            return jsonify({'answer': "Sorry, I am only specialized in recycling and environmental topics. How can I help you in this field?"})
+        return jsonify({'answer': off_topic_msg})
 
-    # 3. لو السؤال له علاقة، نبدأ عملية البحث في ويكيبيديا
     try:
-        language = detect(query)
-        
-        # 2. Set Wikipedia language and error message accordingly
-        if language == 'ar':
-            wikipedia.set_lang("ar")
-            not_found_msg = "عذراً، لم أجد معلومات كافية عن هذا الموضوع البيئي."
-        else:
-            wikipedia.set_lang("en")
-            not_found_msg = "Sorry, I couldn't find enough information on this environmental topic."
-
+        # استخدام sentences=2 للحصول على ملخص قصير ومفيد
         summary = wikipedia.summary(query, sentences=2)
-        
         return jsonify({
-            'detected_language': language,
+            'detected_language': lang,
             'answer': summary,
-            'source': 'PRET Encyclopedia (Wikipedia)'
+            'source': 'Wikipedia'
         })
-    except Exception as e:
+    except (wikipedia.exceptions.PageError, wikipedia.exceptions.DisambiguationError):
         return jsonify({'answer': not_found_msg})
-
+    except Exception:
+        return jsonify({'answer': "حدث خطأ أثناء البحث، حاول مرة أخرى." if lang == 'ar' else "An error occurred during search."})
 
 if __name__ == '__main__':
+    # تأكد من أن البورت 8080 متاح أو غيره حسب إعدادات السيرفر
     app.run(host='0.0.0.0', port=8080, debug=False)
