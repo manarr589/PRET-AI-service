@@ -117,80 +117,108 @@ def get_prediction():
     if db is None:
         return jsonify({'error': 'Database not connected'}), 503
 
-    status_filter = request.args.get('status')
-    query = {}
-    if status_filter:
-        query['status'] = status_filter
+    # 1. جلب البيانات من MongoDB بدلاً من pd.read_csv
+    wastes_collection = db['wastes']
+    # نطلب فقط الحقول المطلوبة (التاريخ والوزن)
+    records = list(wastes_collection.find({}, {'_id': 0, 'createdAt': 1, 'total_weight': 1}))
 
-    wastes = db['wastes']
-    records = list(wastes.find(query, {'_id': 0, 'createdAt': 1, 'total_weight': 1}))
+    # التأكد من وجود بيانات كافية للتدريب
+    if len(records) < 2:
+        return jsonify({'error': 'Insufficient data to make a prediction'}), 400
 
-    if not records:
-        return jsonify({'error': 'No waste records found'}), 404
+    try:
+        # 2. تحويل البيانات إلى DataFrame
+        data = pd.DataFrame(records)
+        
+        # التأكد من تحويل التواريخ بشكل صحيح (تعادل خطوة pd.to_datetime في كودك)
+        data['Date'] = pd.to_datetime(data['createdAt'], errors='coerce')
+        data = data.dropna(subset=['Date', 'total_weight'])
+        
+        # تحويل التاريخ إلى رقم Ordinal (نفس منطق الكود الخاص بك)
+        data['Date_Ordinal'] = data['Date'].map(datetime.toordinal)
+        
+        # 3. تدريب الموديل (نفس منطق الكود الخاص بك)
+        X = data[['Date_Ordinal']]
+        y = data['total_weight']
+        model = LinearRegression()
+        model.fit(X, y)
 
-    data = pd.DataFrame(records)
-    data['createdAt'] = pd.to_datetime(data['createdAt'], errors='coerce')
-    data = data.dropna(subset=['createdAt', 'total_weight'])
+        # 4. حساب أول يوم في الشهر القادم آلياً
+        today = datetime.now()
+        next_month_first_day = (today + relativedelta(months=1)).replace(day=1)
+        
+        # 5. التنبؤ
+        prediction_date_num = np.array([[next_month_first_day.toordinal()]])
+        prediction = model.predict(prediction_date_num)
+        
+        # ضمان أن النتيجة ليست سالبة
+        predicted_kg = max(0, float(prediction[0]))
 
-    if data.empty:
-        return jsonify({'error': 'No valid records after parsing'}), 422
+        return jsonify({
+            'status': 'success',
+            'target_date': next_month_first_day.strftime('%Y-%m-%d'),
+            'predicted_weight_kg': round(predicted_kg, 2),
+            'records_count': len(data)
+        })
 
-    data['date_ordinal'] = data['createdAt'].map(datetime.toordinal)
-
-    reg = LinearRegression()
-    reg.fit(data[['date_ordinal']], data['total_weight'])
-
-    next_month = (datetime.now() + relativedelta(months=1)).replace(day=1)
-    pred = reg.predict(np.array([[next_month.toordinal()]]))
-
-    return jsonify({
-        'target_date'       : next_month.strftime('%Y-%m-%d'),
-        'predicted_weight_kg': round(float(pred[0]), 2),
-        'records_used'      : len(data),
-        'status_filter'     : status_filter or 'all'
-    })
-
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
 @app.route('/waste_stats', methods=['GET'])
 def waste_stats():
     if db is None:
         return jsonify({'error': 'Database not connected'}), 503
 
-    pipeline = [
-        {
-            '$lookup': {
-                'from': 'materials',
-                'localField': 'material_id',
-                'foreignField': '_id',
-                'as': 'material'
-            }
-        },
-        { '$unwind': { 'path': '$material', 'preserveNullAndEmpty': True } },
-        {
-            '$group': {
-                '_id': '$material._id',
-                'material_name': { '$first': '$material.name' },
-                'total_weight_kg': { '$sum': '$total_weight' },
-                'avg_price': { '$avg': '$price' },
-                'count': { '$sum': 1 },
-                'statuses': { '$addToSet': '$status' }
-            }
-        },
-        {
-            '$project': {
-                '_id': 0,
-                'material_name': { '$ifNull': ['$material_name', 'Unknown'] },
-                'total_weight_kg': { '$round': ['$total_weight_kg', 2] },
-                'avg_price': { '$round': ['$avg_price', 2] },
-                'count': 1,
-                'statuses': 1
-            }
-        },
-        { '$sort': { 'total_weight_kg': -1 } }
-    ]
+    try:
+        pipeline = [
+            # 1. تصفية المستندات التي ليس بها وزن لتجنب أخطاء الحساب
+            { '$match': { 'total_weight': { '$exists': True, '$ne': None } } },
 
-    results = list(db['wastes'].aggregate(pipeline))
-    return jsonify({'stats': results, 'groups': len(results)})
+            # 2. الربط مع مجموعة المواد
+            {
+                '$lookup': {
+                    'from': 'materials',
+                    'localField': 'material_id',
+                    'foreignField': '_id',
+                    'as': 'material'
+                }
+            },
+            { '$unwind': { 'path': '$material', 'preserveNullAndEmpty': True } },
 
+            # 3. التجميع
+            {
+                '$group': {
+                    '_id': '$material._id',
+                    'material_name': { '$first': '$material.name' },
+                    'total_weight_kg': { '$sum': '$total_weight' },
+                    'avg_price': { '$avg': '$price' },
+                    'count': { '$sum': 1 },
+                    'statuses': { '$addToSet': '$status' }
+                }
+            },
+
+            # 4. تجميل المخرجات
+            {
+                '$project': {
+                    '_id': 0,
+                    'material_name': { '$ifNull': ['$material_name', 'Unknown'] },
+                    'total_weight_kg': { '$round': [{ '$ifNull': ['$total_weight_kg', 0] }, 2] },
+                    'avg_price': { '$round': [{ '$ifNull': ['$avg_price', 0] }, 2] },
+                    'count': 1,
+                    'statuses': 1
+                }
+            },
+            { '$sort': { 'total_weight_kg': -1 } }
+        ]
+
+        results = list(db['wastes'].aggregate(pipeline))
+        return jsonify({'stats': results, 'groups': len(results)})
+
+    except Exception as e:
+        # هذا السطر سيطبع الخطأ الحقيقي في Terminal الخاص بـ Railway
+        print(f"Error in waste_stats: {e}")
+        return jsonify({'error': str(e), 'message': 'Internal Server Error during aggregation'}), 500
+    
 @app.route('/ask_pret', methods=['POST'])
 def ask_pret():
     data = request.json or {}
