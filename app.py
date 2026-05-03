@@ -11,7 +11,6 @@ from bson import ObjectId
 import io
 import wikipedia
 from langdetect import detect
-
 app = Flask(__name__)
 
 # ──────────────────────────────────────────────
