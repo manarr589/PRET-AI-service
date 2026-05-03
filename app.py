@@ -179,7 +179,7 @@ def waste_stats():
 
     try:
         pipeline = [
-            # 1. تصفية المستندات التي ليس بها وزن لتجنب أخطاء الحساب
+            # 1. تصفية المستندات التي تحتوي على وزن
             { '$match': { 'total_weight': { '$exists': True, '$ne': None } } },
 
             # 2. الربط مع مجموعة المواد
@@ -188,16 +188,20 @@ def waste_stats():
                     'from': 'materials',
                     'localField': 'material_id',
                     'foreignField': '_id',
-                    'as': 'material'
+                    'as': 'material_info'
                 }
             },
-            { '$unwind': { 'path': '$material', 'preserveNullAndEmptyArrays': True } },
 
-            # 3. التجميع
+            # 3. التفكيك (تغيير جذري هنا لحل مشكلة الخطأ)
+            # تم حذف preserveNullAndEmptyArrays تماماً واستبداله بتنسيق بسيط
+            # إذا استمر الخطأ في هذا السطر، فالمشكلة في الـ Deployment نفسه
+            { '$unwind': '$material_info' },
+
+            # 4. التجميع
             {
                 '$group': {
-                    '_id': '$material._id',
-                    'material_name': { '$first': '$material.name' },
+                    '_id': '$material_info._id',
+                    'material_name': { '$first': '$material_info.name' },
                     'total_weight_kg': { '$sum': '$total_weight' },
                     'avg_price': { '$avg': '$price' },
                     'count': { '$sum': 1 },
@@ -205,7 +209,7 @@ def waste_stats():
                 }
             },
 
-            # 4. تجميل المخرجات
+            # 5. التنسيق النهائي
             {
                 '$project': {
                     '_id': 0,
@@ -220,12 +224,13 @@ def waste_stats():
         ]
 
         results = list(db['wastes'].aggregate(pipeline))
-        return jsonify({'stats': results, 'groups': len(results)})
+        return jsonify({'success': True, 'stats': results, 'groups': len(results)})
 
     except Exception as e:
-        # هذا السطر سيطبع الخطأ الحقيقي في Terminal الخاص بـ Railway
-        print(f"Error in waste_stats: {e}")
-        return jsonify({'error': str(e), 'message': 'Internal Server Error during aggregation'}), 500
+        # طباعة الخطأ بوضوح في Railway Logs
+        print("--- DATABASE ERROR LOG ---")
+        print(str(e))
+        return jsonify({'error': str(e), 'status': 'failed'}), 500
     
 @app.route('/ask_pret', methods=['POST'])
 def ask_pret():
