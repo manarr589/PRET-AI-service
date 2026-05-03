@@ -35,6 +35,7 @@ except Exception as e:
 # ──────────────────────────────────────────────
 # TensorFlow Model
 # ──────────────────────────────────────────────
+
 # 1. تحديد المسار الأساسي
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -286,3 +287,6 @@ def ask_pret():
 if __name__ == '__main__':
     # تأكد من أن البورت 8080 متاح أو غيره حسب إعدادات السيرفر
     app.run(host='0.0.0.0', port=8080, debug=False)
+    
+    
+    
