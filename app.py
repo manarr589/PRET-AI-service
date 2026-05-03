@@ -148,29 +148,25 @@ def get_prediction():
         
         X = data[['Date_Ordinal']]
         y = data['total_weight']
-        model = LinearRegression()
-        model.fit(X, y)
+        model_lr = LinearRegression() # سميته model_lr لتمييزه عن موديل الصور
+        model_lr.fit(X, y)
 
-        # ──────────────────────────────────────────────────────────
-        # التعديل هنا: حساب التاريخ بعد 4 أيام من الآن
-        # ──────────────────────────────────────────────────────────
+        # ────────── التعديل الجديد هنا ──────────
         from datetime import timedelta
         target_date = datetime.now() + timedelta(days=4)
-        # ──────────────────────────────────────────────────────────
-
-        # التنبؤ
-        prediction_date_num = np.array([[target_date.toordinal()]])
-        prediction = model.predict(prediction_date_num)
         
-        # حل مشكلة الرقم السالب (ضمان أن النتيجة >= 0)
+        # التنبؤ باستخدام DataFrame لتجنب تحذير الـ Logs
+        prediction_date_df = pd.DataFrame([[target_date.toordinal()]], columns=['Date_Ordinal'])
+        prediction = model_lr.predict(prediction_date_df)
+        # ──────────────────────────────────────
+
         predicted_kg = max(0, float(prediction[0]))
 
         return jsonify({
             'status': 'success',
-            'target_date': target_date.strftime('%Y-%m-%d'), # سيظهر التاريخ بعد 4 أيام
+            'target_date': target_date.strftime('%Y-%m-%d'),
             'predicted_weight_kg': round(predicted_kg, 2),
-            'records_count': len(data),
-            'interval': '4 days'
+            'records_count': len(data)
         })
 
     except Exception as e:
@@ -195,7 +191,7 @@ def waste_stats():
                     'as': 'material'
                 }
             },
-            { '$unwind': { 'path': '$material', 'preserveNullAndEmpty': True } },
+            { '$unwind': { 'path': '$material', 'preserveNullAndEmptyArrays': True } },
 
             # 3. التجميع
             {
