@@ -11,6 +11,8 @@ from bson import ObjectId
 import io
 import wikipedia
 from langdetect import detect
+import os
+import tensorflow as tf
 
 app = Flask(__name__)
 
@@ -33,12 +35,25 @@ except Exception as e:
 # ──────────────────────────────────────────────
 # TensorFlow Model
 # ──────────────────────────────────────────────
+import os
+import tensorflow as tf
+
+# الحصول على المسار الأساسي
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# دمج المسار: مجلد Models ثم ملف keras_model.h5
+model_path = os.path.join(BASE_DIR, 'Models', 'keras_model.h5')
+
 model = None
 try:
-    model = tf.keras.models.load_model('Models/keras_model.h5', compile=False)
-    print("[OK] Model loaded successfully!")
+    if os.path.exists(model_path):
+        model = tf.keras.models.load_model(model_path, compile=False)
+        print(f"[OK] Model loaded from: {model_path}")
+    else:
+        # إذا لم يجد الملف، سيطبع لنا في الـ Logs أين بحث بالضبط
+        print(f"[ERROR] Model NOT found! Path searched: {model_path}")
 except Exception as e:
-    print(f"[WARN] Could not load model: {e}")
+    print(f"[WARN] Error loading model: {e}")
 
 # ──────────────────────────────────────────────
 # Helper: classify waste from image
