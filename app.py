@@ -134,48 +134,43 @@ def get_prediction():
     if db is None:
         return jsonify({'error': 'Database not connected'}), 503
 
-    # 1. جلب البيانات من MongoDB بدلاً من pd.read_csv
     wastes_collection = db['wastes']
-    # نطلب فقط الحقول المطلوبة (التاريخ والوزن)
     records = list(wastes_collection.find({}, {'_id': 0, 'createdAt': 1, 'total_weight': 1}))
 
-    # التأكد من وجود بيانات كافية للتدريب
     if len(records) < 2:
         return jsonify({'error': 'Insufficient data to make a prediction'}), 400
 
     try:
-        # 2. تحويل البيانات إلى DataFrame
         data = pd.DataFrame(records)
-        
-        # التأكد من تحويل التواريخ بشكل صحيح (تعادل خطوة pd.to_datetime في كودك)
         data['Date'] = pd.to_datetime(data['createdAt'], errors='coerce')
         data = data.dropna(subset=['Date', 'total_weight'])
-        
-        # تحويل التاريخ إلى رقم Ordinal (نفس منطق الكود الخاص بك)
         data['Date_Ordinal'] = data['Date'].map(datetime.toordinal)
         
-        # 3. تدريب الموديل (نفس منطق الكود الخاص بك)
         X = data[['Date_Ordinal']]
         y = data['total_weight']
         model = LinearRegression()
         model.fit(X, y)
 
-        # 4. حساب أول يوم في الشهر القادم آلياً
-        today = datetime.now()
-        next_month_first_day = (today + relativedelta(months=1)).replace(day=1)
-        
-        # 5. التنبؤ
-        prediction_date_num = np.array([[next_month_first_day.toordinal()]])
+        # ──────────────────────────────────────────────────────────
+        # التعديل هنا: حساب التاريخ بعد 4 أيام من الآن
+        # ──────────────────────────────────────────────────────────
+        from datetime import timedelta
+        target_date = datetime.now() + timedelta(days=4)
+        # ──────────────────────────────────────────────────────────
+
+        # التنبؤ
+        prediction_date_num = np.array([[target_date.toordinal()]])
         prediction = model.predict(prediction_date_num)
         
-        # ضمان أن النتيجة ليست سالبة
+        # حل مشكلة الرقم السالب (ضمان أن النتيجة >= 0)
         predicted_kg = max(0, float(prediction[0]))
 
         return jsonify({
             'status': 'success',
-            'target_date': next_month_first_day.strftime('%Y-%m-%d'),
+            'target_date': target_date.strftime('%Y-%m-%d'), # سيظهر التاريخ بعد 4 أيام
             'predicted_weight_kg': round(predicted_kg, 2),
-            'records_count': len(data)
+            'records_count': len(data),
+            'interval': '4 days'
         })
 
     except Exception as e:
