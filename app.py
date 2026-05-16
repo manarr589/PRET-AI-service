@@ -98,35 +98,41 @@ def classify_waste():
     if 'image' not in request.files:
         return jsonify({'error': 'No image provided'}), 400
     if model is None:
-        return jsonify({'error': 'AI model not loaded on server'}), 503
+        return jsonify({'error': 'AI model not loaded'}), 503
 
     image_file = request.files['image']
     result = predict_waste_type(image_file)
     class_index = result['class_index']
-    confidence  = result['confidence']
-
-    # قائمة المواد حسب ترتيب تدريب الموديل الخاص بك
-    waste_mapping = {0: "Plastic", 1: "Paper", 2: "Oil"}
-    target_material_name = waste_mapping.get(class_index, "Unknown")
-
+    
+    # القائمة المحدثة (تأكدي من مطابقتها لملف labels.txt)
+    waste_mapping = {
+        0: "Plastic", 
+        1: "Paper", 
+        2: "Cardboard", 
+        3: "Oil" , 
+        4: "Metal",
+        5: "Glass",
+        6: "Non-Recyclable Waste",
+    }
+    
+    target_name = waste_mapping.get(class_index, "Unknown")
     material_info = None
+
     if db is not None:
-        # البحث عن المادة في قاعدة البيانات بناءً على الاسم المكتشف
-        mat = db['materials'].find_one({"name": target_material_name})
+        mat = db['materials'].find_one({"name": target_name})
         if mat:
             material_info = {
-                'id'   : str(mat['_id']),
-                'name' : mat.get('name'),
+                'id': str(mat['_id']),
+                'name': mat.get('name'),
                 'price': mat.get('price')
             }
 
     return jsonify({
-        'class_index'  : class_index,
-        'confidence'   : confidence,
-        'material_name': material_info['name'] if material_info else target_material_name,
-        'material_id'  : material_info['id'] if material_info else None,
-        'price'        : material_info['price'] if material_info else 0,
-        'status'       : 'success'
+        'class_index': class_index,
+        'confidence': result['confidence'],
+        'material_name': material_info['name'] if material_info else target_name,
+        'price': material_info['price'] if material_info else 0,
+        'status': 'success'
     })
     
 @app.route('/predict_waste', methods=['GET'])
@@ -135,38 +141,51 @@ def get_prediction():
         return jsonify({'error': 'Database not connected'}), 503
 
     wastes_collection = db['wastes']
-    records = list(wastes_collection.find({}, {'_id': 0, 'createdAt': 1, 'total_weight': 1}))
+    records = list(wastes_collection.find({}, {'_id': 1, 'createdAt': 1, 'total_weight': 1}))
 
     if len(records) < 2:
         return jsonify({'error': 'Insufficient data to make a prediction'}), 400
 
     try:
         data = pd.DataFrame(records)
+        data['_id'] = data['_id'].apply(str)
         data['Date'] = pd.to_datetime(data['createdAt'], errors='coerce')
         data = data.dropna(subset=['Date', 'total_weight'])
         data['Date_Ordinal'] = data['Date'].map(datetime.toordinal)
         
         X = data[['Date_Ordinal']]
         y = data['total_weight']
-        model_lr = LinearRegression() # سميته model_lr لتمييزه عن موديل الصور
+
+        # حساب المتوسطة"
+        average_weight = float(y.mean())
+
+        model_lr = LinearRegression()
         model_lr.fit(X, y)
 
-        # ────────── التعديل الجديد هنا ──────────
         from datetime import timedelta
         target_date = datetime.now() + timedelta(days=4)
         
-        # التنبؤ باستخدام DataFrame لتجنب تحذير الـ Logs
         prediction_date_df = pd.DataFrame([[target_date.toordinal()]], columns=['Date_Ordinal'])
         prediction = model_lr.predict(prediction_date_df)
-        # ──────────────────────────────────────
 
-        predicted_kg = max(0, float(prediction[0]))
+        # المنطق الجديد: 
+        # لو التوقع طلع أصغر من أو يساوي صفر، استخدم المتوسط بدل الصفر
+        raw_prediction = float(prediction[0])
+        if raw_prediction <= 0:
+            predicted_kg = round(average_weight, 2)
+            prediction_type = "average (due to negative trend)"
+        else:
+            predicted_kg = round(raw_prediction, 2)
+            prediction_type = "linear regression"
 
         return jsonify({
             'status': 'success',
             'target_date': target_date.strftime('%Y-%m-%d'),
-            'predicted_weight_kg': round(predicted_kg, 2),
-            'records_count': len(data)
+            'predicted_weight_kg': predicted_kg,
+            'prediction_method': prediction_type,
+            'average_history_weight': round(average_weight, 2),
+            'records_count': len(data),
+           
         })
 
     except Exception as e:
@@ -179,10 +198,10 @@ def waste_stats():
 
     try:
         pipeline = [
-            # 1. تصفية المستندات التي تحتوي على وزن
+            # 1. تصفية
             { '$match': { 'total_weight': { '$exists': True, '$ne': None } } },
 
-            # 2. الربط مع مجموعة المواد
+            # 2. الربط مع المواد
             {
                 '$lookup': {
                     'from': 'materials',
@@ -191,13 +210,9 @@ def waste_stats():
                     'as': 'material_info'
                 }
             },
-
-            # 3. التفكيك (تغيير جذري هنا لحل مشكلة الخطأ)
-            # تم حذف preserveNullAndEmptyArrays تماماً واستبداله بتنسيق بسيط
-            # إذا استمر الخطأ في هذا السطر، فالمشكلة في الـ Deployment نفسه
             { '$unwind': '$material_info' },
 
-            # 4. التجميع
+            # 3. التجميع مع الاحتفاظ بقائمة الـ IDs الخاصة بكل منتج
             {
                 '$group': {
                     '_id': '$material_info._id',
@@ -205,32 +220,39 @@ def waste_stats():
                     'total_weight_kg': { '$sum': '$total_weight' },
                     'avg_price': { '$avg': '$price' },
                     'count': { '$sum': 1 },
-                    'statuses': { '$addToSet': '$status' }
+                    # هنا الفكرة: نجمع كل IDs المنتجات في مصفوفة واحدة لكل نوع
+                    'all_product_ids': { '$push': '$_id' } 
                 }
             },
 
-            # 5. التنسيق النهائي
+            # 4. التنسيق النهائي
             {
                 '$project': {
                     '_id': 0,
-                    'material_name': { '$ifNull': ['$material_name', 'Unknown'] },
-                    'total_weight_kg': { '$round': [{ '$ifNull': ['$total_weight_kg', 0] }, 2] },
-                    'avg_price': { '$round': [{ '$ifNull': ['$avg_price', 0] }, 2] },
+                    'material_id': '$_id',
+                    'material_name': 1,
+                    'total_weight_kg': { '$round': ['$total_weight_kg', 2] },
+                    'avg_price': { '$round': ['$avg_price', 2] },
                     'count': 1,
-                    'statuses': 1
+                    'all_product_ids': 1 # ستظهر هنا قائمة بكل الـ IDs
                 }
             },
             { '$sort': { 'total_weight_kg': -1 } }
         ]
 
         results = list(db['wastes'].aggregate(pipeline))
-        return jsonify({'success': True, 'stats': results, 'groups': len(results)})
+
+        # تحويل الـ ObjectIds إلى نصوص (Strings) لمنع أخطاء الـ JSON
+        for res in results:
+            res['material_id'] = str(res['material_id'])
+            # تحويل كل ID داخل القائمة إلى نص
+            res['all_product_ids'] = [str(pid) for pid in res['all_product_ids']]
+
+        return jsonify({'success': True, 'stats': results})
 
     except Exception as e:
-        # طباعة الخطأ بوضوح في Railway Logs
-        print("--- DATABASE ERROR LOG ---")
         print(str(e))
-        return jsonify({'error': str(e), 'status': 'failed'}), 500
+        return jsonify({'error': str(e)}), 500
     
 @app.route('/ask_pret', methods=['POST'])
 def ask_pret():
