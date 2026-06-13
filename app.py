@@ -1,9 +1,9 @@
 import pandas as pd
 import numpy as np
 import tensorflow as tf
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 from sklearn.linear_model import LinearRegression
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from PIL import Image
 from pymongo import MongoClient
@@ -12,7 +12,19 @@ import io
 import wikipedia
 from langdetect import detect
 import os
-import tensorflow as tf
+from google import genai
+from google.genai import types
+import jwt
+
+# تأكدي من تسجيل الـ GEMINI_API_KEY في الـ Secrets على هاجنج فيس
+client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+# إنشاء جلسة شات ثابتة مع إعطائه تعليمات صارمة بالتخصص البيئي
+SYSTEM_INSTRUCTION = (
+    "أنت مساعد ذكي متخصص فقط في مجال البيئة وإعادة التدوير والاستدامة واسمك PRET. "
+    "يجب أن تجيب على الأسئلة البيئية فقط بذكاء وسياق متصل وتتذكر الأسئلة السابقة للمستخدم. "
+    "إذا سألك المستخدم في أي موضوع خارج البيئة وإعادة التدوير، اعتذر منه بلطف وأخبره أنك متخصص في البيئة فقط."
+)
 
 app = Flask(__name__)
 
@@ -32,26 +44,48 @@ except Exception as e:
     db = None
     print(f"[WARN] MongoDB connection failed: {e}")
 
+JWT_SECRET = os.environ.get("JWT_SECRET_KEY")
+JWT_ALGORITHM = "HS256"
+
+@app.before_request
+def jwt_authentication_middleware():
+    protected_routes = ['/ask_pret', '/classify_waste', '/predict_waste']
+    
+    if request.path in protected_routes:
+        auth_header = request.headers.get('Authorization')
+        
+        if not auth_header:
+            return jsonify({'status': 'error', 'message': 'عذراً، يجب تسجيل الدخول أولاً (Missing Token).'}), 401
+            
+        try:
+            token = auth_header.split(" ")[1] if " " in auth_header else auth_header
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            
+            # حفظ المعرف في كلا الحقلين لضمان عمل الـ Middleware مع بقية الفانكشنز بسلاسة
+            g.user_id = payload.get('sub')
+            g.sub = payload.get('sub')
+            
+            if not g.user_id:
+                return jsonify({'status': 'error', 'message': 'التوكن غير صالح: لا يحتوي على معرف مستخدم.'}), 401
+                
+        except jwt.ExpiredSignatureError:
+            return jsonify({'status': 'error', 'message': 'انتهت صلاحية جلسة الدخول، يرجى تسجيل الدخول مجدداً.'}), 401
+        except (jwt.InvalidTokenError, IndexError):
+            return jsonify({'status': 'error', 'message': 'توكن غير صالح أو تم التلاعب به.'}), 401
+
 # ──────────────────────────────────────────────
 # TensorFlow Model
 # ──────────────────────────────────────────────
-
-# 1. تحديد المسار الأساسي
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# 2. بناء المسار (تأكد أن الحروف تطابق GitHub تماماً)
-# إذا كان المجلد Models والملف keras_model.h5
 model_path = os.path.join(BASE_DIR, 'Models', 'keras_model.h5')
-
 model = None
+
 try:
     if os.path.exists(model_path):
-        # تحميل الموديل بدون تفعيل الـ Compile لتوفير الذاكرة وتجنب الأخطاء
         model = tf.keras.models.load_model(model_path, compile=False)
         print(f"Success: Model loaded from {model_path}")
     else:
         print(f" Error: File not found at {model_path}")
-        # هذا السطر سيطبع لك محتويات المجلد في الـ Logs لتكتشف الاسم الصحيح
         if os.path.exists(os.path.join(BASE_DIR, 'Models')):
             print(f"Folder 'Models' contains: {os.listdir(os.path.join(BASE_DIR, 'Models'))}")
 except Exception as e:
@@ -81,7 +115,6 @@ def predict_waste_type(image_file):
 # ──────────────────────────────────────────────
 # Routes
 # ──────────────────────────────────────────────
-
 @app.route('/health', methods=['GET'])
 def health():
     db_status = "disconnected"
@@ -99,12 +132,11 @@ def classify_waste():
         return jsonify({'error': 'No image provided'}), 400
     if model is None:
         return jsonify({'error': 'AI model not loaded'}), 503
-
+        
     image_file = request.files['image']
     result = predict_waste_type(image_file)
     class_index = result['class_index']
     
-    # القائمة المحدثة (تأكدي من مطابقتها لملف labels.txt)
     waste_mapping = {
         0: "Plastic", 
         1: "Paper", 
@@ -117,7 +149,6 @@ def classify_waste():
     
     target_name = waste_mapping.get(class_index, "Unknown")
     material_info = None
-
     if db is not None:
         mat = db['materials'].find_one({"name": target_name})
         if mat:
@@ -126,7 +157,7 @@ def classify_waste():
                 'name': mat.get('name'),
                 'price': mat.get('price')
             }
-
+            
     return jsonify({
         'class_index': class_index,
         'confidence': result['confidence'],
@@ -134,42 +165,38 @@ def classify_waste():
         'price': material_info['price'] if material_info else 0,
         'status': 'success'
     })
-    
+
 @app.route('/predict_waste', methods=['GET'])
 def get_prediction():
     if db is None:
         return jsonify({'error': 'Database not connected'}), 503
-
+        
     wastes_collection = db['wastes']
     records = list(wastes_collection.find({}, {'_id': 1, 'createdAt': 1, 'total_weight': 1}))
-
+    
     if len(records) < 2:
         return jsonify({'error': 'Insufficient data to make a prediction'}), 400
-
+        
     try:
         data = pd.DataFrame(records)
         data['_id'] = data['_id'].apply(str)
         data['Date'] = pd.to_datetime(data['createdAt'], errors='coerce')
         data = data.dropna(subset=['Date', 'total_weight'])
-        data['Date_Ordinal'] = data['Date'].map(datetime.toordinal)
+        
+        # 👑 الإصلاح الأول: تطبيق الدالة على كائن التاريخ الفردي داخل الـ lambda بشكل صحيح
+        data['Date_Ordinal'] = data['Date'].apply(lambda x: x.toordinal())
         
         X = data[['Date_Ordinal']]
         y = data['total_weight']
-
-        # حساب المتوسطة"
+        
         average_weight = float(y.mean())
-
         model_lr = LinearRegression()
         model_lr.fit(X, y)
-
-        from datetime import timedelta
-        target_date = datetime.now() + timedelta(days=4)
         
+        target_date = datetime.now() + timedelta(days=4)
         prediction_date_df = pd.DataFrame([[target_date.toordinal()]], columns=['Date_Ordinal'])
         prediction = model_lr.predict(prediction_date_df)
-
-        # المنطق الجديد: 
-        # لو التوقع طلع أصغر من أو يساوي صفر، استخدم المتوسط بدل الصفر
+        
         raw_prediction = float(prediction[0])
         if raw_prediction <= 0:
             predicted_kg = round(average_weight, 2)
@@ -177,134 +204,11 @@ def get_prediction():
         else:
             predicted_kg = round(raw_prediction, 2)
             prediction_type = "linear regression"
-
+            
         return jsonify({
             'status': 'success',
             'target_date': target_date.strftime('%Y-%m-%d'),
             'predicted_weight_kg': predicted_kg,
             'prediction_method': prediction_type,
             'average_history_weight': round(average_weight, 2),
-            'records_count': len(data),
-           
-        })
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    
-@app.route('/waste_stats', methods=['GET'])
-def waste_stats():
-    if db is None:
-        return jsonify({'error': 'Database not connected'}), 503
-
-    try:
-        pipeline = [
-            # 1. تصفية
-            { '$match': { 'total_weight': { '$exists': True, '$ne': None } } },
-
-            # 2. الربط مع المواد
-            {
-                '$lookup': {
-                    'from': 'materials',
-                    'localField': 'material_id',
-                    'foreignField': '_id',
-                    'as': 'material_info'
-                }
-            },
-            { '$unwind': '$material_info' },
-
-            # 3. التجميع مع الاحتفاظ بقائمة الـ IDs الخاصة بكل منتج
-            {
-                '$group': {
-                    '_id': '$material_info._id',
-                    'material_name': { '$first': '$material_info.name' },
-                    'total_weight_kg': { '$sum': '$total_weight' },
-                    'avg_price': { '$avg': '$price' },
-                    'count': { '$sum': 1 },
-                    # هنا الفكرة: نجمع كل IDs المنتجات في مصفوفة واحدة لكل نوع
-                    'all_product_ids': { '$push': '$_id' } 
-                }
-            },
-
-            # 4. التنسيق النهائي
-            {
-                '$project': {
-                    '_id': 0,
-                    'material_id': '$_id',
-                    'material_name': 1,
-                    'total_weight_kg': { '$round': ['$total_weight_kg', 2] },
-                    'avg_price': { '$round': ['$avg_price', 2] },
-                    'count': 1,
-                    'all_product_ids': 1 # ستظهر هنا قائمة بكل الـ IDs
-                }
-            },
-            { '$sort': { 'total_weight_kg': -1 } }
-        ]
-
-        results = list(db['wastes'].aggregate(pipeline))
-
-        # تحويل الـ ObjectIds إلى نصوص (Strings) لمنع أخطاء الـ JSON
-        for res in results:
-            res['material_id'] = str(res['material_id'])
-            # تحويل كل ID داخل القائمة إلى نص
-            res['all_product_ids'] = [str(pid) for pid in res['all_product_ids']]
-
-        return jsonify({'success': True, 'stats': results})
-
-    except Exception as e:
-        print(str(e))
-        return jsonify({'error': str(e)}), 500
-    
-@app.route('/ask_pret', methods=['POST'])
-def ask_pret():
-    data = request.json or {}
-    query = data.get('query', '').strip()
-    
-    if not query:
-        return jsonify({'error': 'No query provided'}), 400
-
-    # تحديد اللغة والرسائل الافتراضية
-    try:
-        lang = detect(query)
-    except:
-        lang = 'en'
-
-    if lang == 'ar':
-        not_found_msg = "عذراً، لم أجد معلومات كافية عن هذا الموضوع البيئي."
-        off_topic_msg = "عذراً، أنا متخصص فقط في إعادة التدوير والبيئة."
-        wikipedia.set_lang("ar")
-    else:
-        not_found_msg = "Sorry, I couldn't find enough information on this topic."
-        off_topic_msg = "Sorry, I am only specialized in recycling and environmental topics."
-        wikipedia.set_lang("en")
-
-    environmental_keywords = [
-        'recycling', 'waste', 'plastic', 'paper', 'oil', 'environment', 
-        'pollution', 'climate', 'green', 'nature', 'sustainability',
-        'تدوير', 'نفايات', 'بلاستيك', 'ورق', 'زيت', 'بيئة', 
-        'تلوث', 'مناخ', 'استدامة', 'مخلفات'
-    ]
-
-    is_related = any(word in query.lower() for word in environmental_keywords)
-
-    if not is_related:
-        return jsonify({'answer': off_topic_msg})
-
-    try:
-        # استخدام sentences=2 للحصول على ملخص قصير ومفيد
-        summary = wikipedia.summary(query, sentences=2)
-        return jsonify({
-            'detected_language': lang,
-            'answer': summary,
-            'source': 'Wikipedia'
-        })
-    except (wikipedia.exceptions.PageError, wikipedia.exceptions.DisambiguationError):
-        return jsonify({'answer': not_found_msg})
-    except Exception:
-        return jsonify({'answer': "حدث خطأ أثناء البحث، حاول مرة أخرى." if lang == 'ar' else "An error occurred during search."})
-
-if __name__ == '__main__':
-    # تأكد من أن البورت 8080 متاح أو غيره حسب إعدادات السيرفر
-    app.run(host='0.0.0.0', port=8080, debug=False)
-    
-    
-    
+            'records_count': len(data), 
